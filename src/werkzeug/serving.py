@@ -244,6 +244,7 @@ class WSGIRequestHandler(BaseHTTPRequestHandler):
 
         return environ
 
+    # JAMLEE: 通过这里启动 app
     def run_wsgi(self) -> None:
         if self.headers.get("Expect", "").lower().strip() == "100-continue":
             self.wfile.write(b"HTTP/1.1 100 Continue\r\n\r\n")
@@ -691,6 +692,7 @@ class BaseWSGIServer(HTTPServer):
         self.host = host
         self.port = self.socket.getsockname()[1]
 
+        # JAMLEE: 打开了 socket
         # Patch in the original socket.
         if fd is not None:
             self.socket.close()
@@ -752,11 +754,13 @@ class ForkingWSGIServer(ForkingMixIn, BaseWSGIServer):
         ssl_context: t.Optional[_TSSLContextArg] = None,
         fd: t.Optional[int] = None,
     ) -> None:
+        # JAMLEE：这里没有传入process。通过 self.max_children 传入的
         if not can_fork:
             raise ValueError("Your platform does not support forking.")
         BaseWSGIServer.__init__(
             self, host, port, app, handler, passthrough_errors, ssl_context, fd
         )
+        # JAMLEE: 这个是 socketserver 的配置
         self.max_children = processes
 
 
@@ -771,15 +775,18 @@ def make_server(
     ssl_context: t.Optional[_TSSLContextArg] = None,
     fd: t.Optional[int] = None,
 ) -> BaseWSGIServer:
+    # JAMLEE: 创建一个新的服务器, 多进程和多线程，二选其一
     """Create a new server instance that is either threaded, or forks
     or just processes one request after another.
     """
+    # JAMLEE: 如果同时配置了多进程和多线程。则抛出错误
     if threaded and processes > 1:
         raise ValueError("cannot have a multithreaded and multi process server.")
     elif threaded:
         return ThreadedWSGIServer(
             host, port, app, request_handler, passthrough_errors, ssl_context, fd=fd
         )
+    # JAMLEE: 多进程使用 Forking
     elif processes > 1:
         return ForkingWSGIServer(
             host,
@@ -805,7 +812,11 @@ def is_running_from_reloader() -> bool:
     """
     return os.environ.get("WERKZEUG_RUN_MAIN") == "true"
 
-
+# JAMLEE: 程序入口，支持多线程和多进程（pre-frok)。这些术语来自 apache
+# pre-fork: 每个子进程只有一个线程，在一个时间点内，只能处理一个请求。
+# worker: prefork模式相比，worker使用了多进程和多线程的混合模式，worker模式也同样会先预派生一些子进程，然后每个子进程创建一些线程，同时包括一个监听线程，每个请求过来会被分配到一个线程来服务。线程比起进程会更轻量，因为线程是通过共享父进程的内存空间，因此，内存的占用会减少一些，在高并发的场景下会比prefork有更多可用的线程，表现会更优秀一些；另外，如果一个线程出现了问题也会导致同一进程下的线程出现问题，如果是多个线程出现问题，也只是影响Apache的一部分，而不是全部。由于用到多进程多线程，需要考虑到线程的安全了，在使用keep-alive长连接的时候，某个线程会一直被占用，即使中间没有请求，需要等待到超时才会被释放（该问题在prefork模式下也存在）。
+# event: apache 基于 worker 又做的改进。2.4 之后才引入。
+# https://segmentfault.com/a/1190000017781841
 def run_simple(
     hostname: str,
     port: int,
@@ -945,6 +956,7 @@ def run_simple(
             fd: t.Optional[int] = int(os.environ["WERKZEUG_SERVER_FD"])
         except (LookupError, ValueError):
             fd = None
+        # JAMLEE: 创建 wsgi 服务器，监听端口。这个server底层就是socketserver。
         srv = make_server(
             hostname,
             port,
