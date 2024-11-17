@@ -61,7 +61,7 @@ looks like this::
 
     def application(environ, start_response):
         start_response('200 OK', [('Content-Type', 'text/plain')])
-        return ['Hello World!']
+        return ['Hello World!'.encode('utf-8')]
 
 A WSGI application is something you can call and pass an environ dict
 and a ``start_response`` callable.  The environ contains all incoming
@@ -123,7 +123,7 @@ if they are not used right away, to keep it from being confusing::
 
     import os
     import redis
-    from werkzeug.urls import url_parse
+    from urllib.parse import urlparse
     from werkzeug.wrappers import Request, Response
     from werkzeug.routing import Map, Rule
     from werkzeug.exceptions import HTTPException, NotFound
@@ -308,7 +308,7 @@ we need to write a function and a helper method.  For URL validation this
 is good enough::
 
     def is_valid_url(url):
-        parts = url_parse(url)
+        parts = urlparse(url)
         return parts.scheme in ('http', 'https')
 
 For inserting the URL, all we need is this little method on our class::

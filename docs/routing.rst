@@ -42,7 +42,7 @@ Here is a simple example which could be the URL definition for a blog::
         except HTTPException, e:
             return e(environ, start_response)
         start_response('200 OK', [('Content-Type', 'text/plain')])
-        return [f'Rule points to {endpoint!r} with arguments {args!r}']
+        return [f'Rule points to {endpoint!r} with arguments {args!r}'.encode()]
 
 So what does that do?  First of all we create a new :class:`Map` which stores
 a bunch of URL rules.  Then we pass it a list of :class:`Rule` objects.
@@ -127,6 +127,13 @@ Maps, Rules and Adapters
    :members: empty
 
 
+Matchers
+========
+
+.. autoclass:: StateMachineMatcher
+   :members:
+
+
 Rule Factories
 ==============
 
@@ -157,7 +164,13 @@ built-in converters. To make a custom converter, subclass
 
 The converter should have a ``regex`` attribute with a regular
 expression to match with. If the converter can take arguments in a URL
-rule, it should accept them in its ``__init__`` method.
+rule, it should accept them in its ``__init__`` method. The entire
+regex expression will be matched as a group and used as the value for
+conversion.
+
+If a custom converter can match a forward slash, ``/``, it should have
+the attribute ``part_isolating`` set to ``False``. This will ensure
+that rules using the custom converter are correctly matched.
 
 It can implement a ``to_python`` method to convert the matched string to
 some other object. This can also do extra validation that wasn't
@@ -261,3 +274,34 @@ scheme and host, ``force_external=True`` is implied.
 
     url = adapter.build("comm")
     assert url == "ws://example.org/ws"
+
+
+State Machine Matching
+======================
+
+The default matching algorithm uses a state machine that transitions
+between parts of the request path to find a match. To understand how
+this works consider this rule::
+
+    /resource/<id>
+
+Firstly this rule is decomposed into two ``RulePart``. The first is a
+static part with a content equal to ``resource``, the second is
+dynamic and requires a regex match to ``[^/]+``.
+
+A state machine is then created with an initial state that represents
+the rule's first ``/``. This initial state has a single, static
+transition to the next state which represents the rule's second
+``/``. This second state has a single dynamic transition to the final
+state which includes the rule.
+
+To match a path the matcher starts and the initial state and follows
+transitions that work. Clearly a trial path of ``/resource/2`` has the
+parts ``""``, ``resource``, and ``2`` which match the transitions and
+hence a rule will match. Whereas ``/other/2`` will not match as there
+is no transition for the ``other`` part from the initial state.
+
+The only diversion from this rule is if a ``RulePart`` is not
+part-isolating i.e. it will match ``/``. In this case the ``RulePart``
+is considered final and represents a transition that must include all
+the subsequent parts of the trial path.

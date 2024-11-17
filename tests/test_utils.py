@@ -1,30 +1,42 @@
+from __future__ import annotations
+
 import inspect
 from datetime import datetime
 
 import pytest
 
+from werkzeug import Request
 from werkzeug import utils
 from werkzeug.datastructures import Headers
 from werkzeug.http import http_date
 from werkzeug.http import parse_date
 from werkzeug.test import Client
+from werkzeug.test import EnvironBuilder
 from werkzeug.wrappers import Response
 
 
-def test_redirect():
-    resp = utils.redirect("/füübär")
-    assert b"/f%C3%BC%C3%BCb%C3%A4r" in resp.get_data()
-    assert resp.headers["Location"] == "/f%C3%BC%C3%BCb%C3%A4r"
-    assert resp.status_code == 302
+@pytest.mark.parametrize(
+    ("url", "code", "expect"),
+    [
+        ("http://example.com", None, "http://example.com"),
+        ("/füübär", 305, "/f%C3%BC%C3%BCb%C3%A4r"),
+        ("http://☃.example.com/", 307, "http://xn--n3h.example.com/"),
+        ("itms-services://?url=abc", None, "itms-services://?url=abc"),
+    ],
+)
+def test_redirect(url: str, code: int | None, expect: str) -> None:
+    environ = EnvironBuilder().get_environ()
 
-    resp = utils.redirect("http://☃.net/", 307)
-    assert b"http://xn--n3h.net/" in resp.get_data()
-    assert resp.headers["Location"] == "http://xn--n3h.net/"
-    assert resp.status_code == 307
+    if code is None:
+        resp = utils.redirect(url)
+        assert resp.status_code == 302
+    else:
+        resp = utils.redirect(url, code)
+        assert resp.status_code == code
 
-    resp = utils.redirect("http://example.com/", 305)
-    assert resp.headers["Location"] == "http://example.com/"
-    assert resp.status_code == 305
+    assert resp.headers["Location"] == url
+    assert resp.get_wsgi_headers(environ)["Location"] == expect
+    assert resp.get_data(as_text=True).count(url) == 2
 
 
 def test_redirect_xss():
@@ -164,6 +176,7 @@ def test_environ_property():
 
 def test_import_string():
     from datetime import date
+
     from werkzeug.debug import DebuggedApplication
 
     assert utils.import_string("datetime.date") is date
@@ -236,14 +249,36 @@ def test_header_set_duplication_bug():
     )
 
 
-def test_append_slash_redirect():
-    def app(env, sr):
-        return utils.append_slash_redirect(env)(env, sr)
+@pytest.mark.parametrize(
+    ("path", "base_url", "absolute_location"),
+    [
+        ("foo", "http://example.org/app", "http://example.org/app/foo/"),
+        ("/foo", "http://example.org/app", "http://example.org/app/foo/"),
+        ("/foo/bar", "http://example.org/", "http://example.org/foo/bar/"),
+        ("/foo/bar", "http://example.org/app", "http://example.org/app/foo/bar/"),
+        ("/foo?baz", "http://example.org/", "http://example.org/foo/?baz"),
+        ("/foo/", "http://example.org/", "http://example.org/foo/"),
+        ("/foo/", "http://example.org/app", "http://example.org/app/foo/"),
+        ("/", "http://example.org/", "http://example.org/"),
+        ("/", "http://example.org/app", "http://example.org/app/"),
+    ],
+)
+@pytest.mark.parametrize("autocorrect", [False, True])
+def test_append_slash_redirect(autocorrect, path, base_url, absolute_location):
+    @Request.application
+    def app(request):
+        rv = utils.append_slash_redirect(request.environ)
+        rv.autocorrect_location_header = autocorrect
+        return rv
 
     client = Client(app)
-    response = client.get("foo", base_url="http://example.org/app")
-    assert response.status_code == 301
-    assert response.headers["Location"] == "http://example.org/app/foo/"
+    response = client.get(path, base_url=base_url)
+    assert response.status_code == 308
+
+    if not autocorrect:
+        assert response.headers["Location"].count("/") == 1
+    else:
+        assert response.headers["Location"] == absolute_location
 
 
 def test_cached_property_doc():

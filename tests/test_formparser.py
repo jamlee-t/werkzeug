@@ -69,37 +69,23 @@ class TestFormParser:
         req.max_form_memory_size = 400
         assert req.form["foo"] == "Hello World"
 
+        input_stream = io.BytesIO(b"foo=123456")
+        req = Request.from_values(
+            input_stream=input_stream,
+            content_type="application/x-www-form-urlencoded",
+            method="POST",
+        )
+        req.max_content_length = 4
+        pytest.raises(RequestEntityTooLarge, lambda: req.form["foo"])
+        # content-length was set, so request could exit early without reading anything
+        assert input_stream.read() == b"foo=123456"
+
         data = (
             b"--foo\r\nContent-Disposition: form-field; name=foo\r\n\r\n"
             b"Hello World\r\n"
             b"--foo\r\nContent-Disposition: form-field; name=bar\r\n\r\n"
             b"bar=baz\r\n--foo--"
         )
-        req = Request.from_values(
-            input_stream=io.BytesIO(data),
-            content_length=len(data),
-            content_type="multipart/form-data; boundary=foo",
-            method="POST",
-        )
-        req.max_content_length = 4
-        pytest.raises(RequestEntityTooLarge, lambda: req.form["foo"])
-
-        # when the request entity is too large, the input stream should be
-        # drained so that firefox (and others) do not report connection reset
-        # when run through gunicorn
-        # a sufficiently large stream is necessary for block-based reads
-        input_stream = io.BytesIO(b"foo=" + b"x" * 128 * 1024)
-        req = Request.from_values(
-            input_stream=input_stream,
-            content_length=len(data),
-            content_type="multipart/form-data; boundary=foo",
-            method="POST",
-        )
-        req.max_content_length = 4
-        pytest.raises(RequestEntityTooLarge, lambda: req.form["foo"])
-        # ensure that the stream is exhausted
-        assert input_stream.read() == b""
-
         req = Request.from_values(
             input_stream=io.BytesIO(data),
             content_length=len(data),
@@ -126,6 +112,30 @@ class TestFormParser:
         )
         req.max_form_memory_size = 400
         assert req.form["foo"] == "Hello World"
+
+        req = Request.from_values(
+            input_stream=io.BytesIO(data),
+            content_length=len(data),
+            content_type="multipart/form-data; boundary=foo",
+            method="POST",
+        )
+        req.max_form_parts = 1
+        pytest.raises(RequestEntityTooLarge, lambda: req.form["foo"])
+
+    def test_urlencoded_no_max(self) -> None:
+        r = Request.from_values(method="POST", data={"a": 1, "b": 2})
+        r.max_form_parts = 1
+
+        assert r.form["a"] == "1"
+        assert r.form["b"] == "2"
+
+    def test_urlencoded_silent_decode(self) -> None:
+        r = Request.from_values(
+            data=b"\x80",
+            content_type="application/x-www-form-urlencoded",
+            method="POST",
+        )
+        assert not r.form
 
     def test_missing_multipart_boundary(self):
         data = (
@@ -172,19 +182,14 @@ class TestFormParser:
             monkeypatch.setattr("werkzeug.formparser.SpooledTemporaryFile", None)
 
         data = b"a,b,c\n" * size
-        req = Request.from_values(
+        with Request.from_values(
             data={"foo": (io.BytesIO(data), "test.txt")}, method="POST"
-        )
-        file_storage = req.files["foo"]
-
-        try:
-            reader = csv.reader(io.TextIOWrapper(file_storage))
+        ) as req:
+            reader = csv.reader(io.TextIOWrapper(req.files["foo"]))
             # This fails if file_storage doesn't implement IOBase.
             # https://github.com/pallets/werkzeug/issues/1344
             # https://github.com/python/cpython/pull/3249
             assert sum(1 for _ in reader) == size
-        finally:
-            file_storage.close()
 
     def test_parse_bad_content_type(self):
         parser = FormDataParser()
@@ -258,24 +263,25 @@ class TestMultiPart:
             folder = join(resources, name)
             data = get_contents(join(folder, "request.http"))
             for filename, field, content_type, fsname in files:
-                response = client.post(
+                with client.post(
                     f"/?object={field}",
                     data=data,
                     content_type=f'multipart/form-data; boundary="{boundary}"',
                     content_length=len(data),
-                )
-                lines = response.get_data().split(b"\n", 3)
-                assert lines[0] == repr(filename).encode("ascii")
-                assert lines[1] == repr(field).encode("ascii")
-                assert lines[2] == repr(content_type).encode("ascii")
-                assert lines[3] == get_contents(join(folder, fsname))
-            response = client.post(
+                ) as response:
+                    lines = response.get_data().split(b"\n", 3)
+                    assert lines[0] == repr(filename).encode("ascii")
+                    assert lines[1] == repr(field).encode("ascii")
+                    assert lines[2] == repr(content_type).encode("ascii")
+                    assert lines[3] == get_contents(join(folder, fsname))
+
+            with client.post(
                 "/?object=text",
                 data=data,
                 content_type=f'multipart/form-data; boundary="{boundary}"',
                 content_length=len(data),
-            )
-            assert response.get_data() == repr(text).encode("utf-8")
+            ) as response:
+                assert response.get_data() == repr(text).encode()
 
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
     def test_ie7_unc_path(self):
@@ -283,17 +289,17 @@ class TestMultiPart:
         data_file = join(dirname(__file__), "multipart", "ie7_full_path_request.http")
         data = get_contents(data_file)
         boundary = "---------------------------7da36d1b4a0164"
-        response = client.post(
+        with client.post(
             "/?object=cb_file_upload_multiple",
             data=data,
             content_type=f'multipart/form-data; boundary="{boundary}"',
             content_length=len(data),
-        )
-        lines = response.get_data().split(b"\n", 3)
-        assert lines[0] == b"'Sellersburg Town Council Meeting 02-22-2010doc.doc'"
+        ) as response:
+            lines = response.get_data().split(b"\n", 3)
+            assert lines[0] == b"'Sellersburg Town Council Meeting 02-22-2010doc.doc'"
 
     def test_end_of_file(self):
-        # This test looks innocent but it was actually timeing out in
+        # This test looks innocent but it was actually timing out in
         # the Werkzeug 0.5 release version (#394)
         data = (
             b"--foo\r\n"
@@ -301,14 +307,14 @@ class TestMultiPart:
             b"Content-Type: text/plain\r\n\r\n"
             b"file contents and no end"
         )
-        data = Request.from_values(
+        with Request.from_values(
             input_stream=io.BytesIO(data),
             content_length=len(data),
             content_type="multipart/form-data; boundary=foo",
             method="POST",
-        )
-        assert not data.files
-        assert not data.form
+        ) as data:
+            assert not data.files
+            assert not data.form
 
     def test_file_no_content_type(self):
         data = (
@@ -316,17 +322,17 @@ class TestMultiPart:
             b'Content-Disposition: form-data; name="test"; filename="test.txt"\r\n\r\n'
             b"file contents\r\n--foo--"
         )
-        data = Request.from_values(
+        with Request.from_values(
             input_stream=io.BytesIO(data),
             content_length=len(data),
             content_type="multipart/form-data; boundary=foo",
             method="POST",
-        )
-        assert data.files["test"].filename == "test.txt"
-        assert data.files["test"].read() == b"file contents"
+        ) as data:
+            assert data.files["test"].filename == "test.txt"
+            assert data.files["test"].read() == b"file contents"
 
     def test_extra_newline(self):
-        # this test looks innocent but it was actually timeing out in
+        # this test looks innocent but it was actually timing out in
         # the Werkzeug 0.5 release version (#394)
         data = (
             b"\r\n\r\n--foo\r\n"
@@ -352,18 +358,18 @@ class TestMultiPart:
             b"file contents, just the contents\r\n"
             b"--foo--"
         )
-        req = Request.from_values(
+        with Request.from_values(
             input_stream=io.BytesIO(data),
             content_length=len(data),
             content_type="multipart/form-data; boundary=foo",
             method="POST",
-        )
-        foo = req.files["foo"]
-        assert foo.mimetype == "text/plain"
-        assert foo.mimetype_params == {"charset": "utf-8"}
-        assert foo.headers["content-type"] == foo.content_type
-        assert foo.content_type == "text/plain; charset=utf-8"
-        assert foo.headers["x-custom-header"] == "blah"
+        ) as req:
+            foo = req.files["foo"]
+            assert foo.mimetype == "text/plain"
+            assert foo.mimetype_params == {"charset": "utf-8"}
+            assert foo.headers["content-type"] == foo.content_type
+            assert foo.content_type == "text/plain; charset=utf-8"
+            assert foo.headers["x-custom-header"] == "blah"
 
     @pytest.mark.parametrize("ending", [b"\n", b"\r", b"\r\n"])
     def test_nonstandard_line_endings(self, ending: bytes):
@@ -442,11 +448,23 @@ class TestMultiPartParser:
             b'	filename*2="e f.txt"\r\n\r\n'
             b"file contents\r\n--foo--"
         )
-        request = Request.from_values(
+        with Request.from_values(
             input_stream=io.BytesIO(data),
             content_length=len(data),
             content_type="multipart/form-data; boundary=foo",
             method="POST",
-        )
-        assert request.files["rfc2231"].filename == "a b c d e f.txt"
-        assert request.files["rfc2231"].read() == b"file contents"
+        ) as request:
+            assert request.files["rfc2231"].filename == "a b c d e f.txt"
+            assert request.files["rfc2231"].read() == b"file contents"
+
+
+def test_multipart_max_form_memory_size() -> None:
+    """max_form_memory_size is tracked across multiple data events."""
+    data = b"--bound\r\nContent-Disposition: form-field; name=a\r\n\r\n"
+    data += b"a" * 15 + b"\r\n--bound--"
+    # The buffer size is less than the max size, so multiple data events will be
+    # returned. The field size is greater than the max.
+    parser = formparser.MultiPartParser(max_form_memory_size=10, buffer_size=5)
+
+    with pytest.raises(RequestEntityTooLarge):
+        parser.parse(io.BytesIO(data), b"bound", None)

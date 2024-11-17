@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import io
 import json
 import os
+import typing as t
 
 import pytest
 
@@ -81,50 +84,9 @@ def test_responder():
     assert response.data == b"Test"
 
 
-def test_pop_path_info():
-    original_env = {"SCRIPT_NAME": "/foo", "PATH_INFO": "/a/b///c"}
-
-    # regular path info popping
-    def assert_tuple(script_name, path_info):
-        assert env.get("SCRIPT_NAME") == script_name
-        assert env.get("PATH_INFO") == path_info
-
-    env = original_env.copy()
-
-    def pop():
-        return wsgi.pop_path_info(env)
-
-    assert_tuple("/foo", "/a/b///c")
-    assert pop() == "a"
-    assert_tuple("/foo/a", "/b///c")
-    assert pop() == "b"
-    assert_tuple("/foo/a/b", "///c")
-    assert pop() == "c"
-    assert_tuple("/foo/a/b///c", "")
-    assert pop() is None
-
-
-def test_peek_path_info():
-    env = {"SCRIPT_NAME": "/foo", "PATH_INFO": "/aaa/b///c"}
-
-    assert wsgi.peek_path_info(env) == "aaa"
-    assert wsgi.peek_path_info(env) == "aaa"
-    assert wsgi.peek_path_info(env, charset=None) == b"aaa"
-    assert wsgi.peek_path_info(env, charset=None) == b"aaa"
-
-
 def test_path_info_and_script_name_fetching():
     env = create_environ("/\N{SNOWMAN}", "http://example.com/\N{COMET}/")
     assert wsgi.get_path_info(env) == "/\N{SNOWMAN}"
-    assert wsgi.get_path_info(env, charset=None) == "/\N{SNOWMAN}".encode()
-    assert wsgi.get_script_name(env) == "/\N{COMET}"
-    assert wsgi.get_script_name(env, charset=None) == "/\N{COMET}".encode()
-
-
-def test_query_string_fetching():
-    env = create_environ("/?\N{SNOWMAN}=\N{COMET}")
-    qs = wsgi.get_query_string(env)
-    assert qs == "%E2%98%83=%E2%98%84"
 
 
 def test_limited_stream():
@@ -157,11 +119,10 @@ def test_limited_stream():
     stream = wsgi.LimitedStream(io_, 9)
     assert stream.readlines() == [b"123456\n", b"ab"]
 
-    io_ = io.BytesIO(b"123456\nabcdefg")
+    io_ = io.BytesIO(b"123\n456\nabcdefg")
     stream = wsgi.LimitedStream(io_, 9)
-    assert stream.readlines(2) == [b"12"]
-    assert stream.readlines(2) == [b"34"]
-    assert stream.readlines() == [b"56\n", b"ab"]
+    assert stream.readlines(2) == [b"123\n"]
+    assert stream.readlines() == [b"456\n", b"a"]
 
     io_ = io.BytesIO(b"123456\nabcdefg")
     stream = wsgi.LimitedStream(io_, 9)
@@ -186,13 +147,8 @@ def test_limited_stream():
     stream = wsgi.LimitedStream(io_, 0)
     assert stream.read(-1) == b""
 
-    io_ = io.StringIO("123456")
-    stream = wsgi.LimitedStream(io_, 0)
-    assert stream.read(-1) == ""
-
-    io_ = io.StringIO("123\n456\n")
-    stream = wsgi.LimitedStream(io_, 8)
-    assert list(stream) == ["123\n", "456\n"]
+    stream = wsgi.LimitedStream(io.BytesIO(b"123\n456\n"), 8)
+    assert list(stream) == [b"123\n", b"456\n"]
 
 
 def test_limited_stream_json_load():
@@ -205,51 +161,61 @@ def test_limited_stream_json_load():
 
 
 def test_limited_stream_disconnection():
-    io_ = io.BytesIO(b"A bit of content")
-
-    # disconnect detection on out of bytes
-    stream = wsgi.LimitedStream(io_, 255)
+    # disconnect because stream returns zero bytes
+    stream = wsgi.LimitedStream(io.BytesIO(), 255)
     with pytest.raises(ClientDisconnected):
         stream.read()
 
-    # disconnect detection because file close
-    io_ = io.BytesIO(b"x" * 255)
-    io_.close()
-    stream = wsgi.LimitedStream(io_, 255)
+    # disconnect because stream is closed
+    data = io.BytesIO(b"x" * 255)
+    data.close()
+    stream = wsgi.LimitedStream(data, 255)
+
     with pytest.raises(ClientDisconnected):
         stream.read()
 
 
-def test_path_info_extraction():
-    x = wsgi.extract_path_info("http://example.com/app", "/app/hello")
-    assert x == "/hello"
-    x = wsgi.extract_path_info(
-        "http://example.com/app", "https://example.com/app/hello"
-    )
-    assert x == "/hello"
-    x = wsgi.extract_path_info(
-        "http://example.com/app/", "https://example.com/app/hello"
-    )
-    assert x == "/hello"
-    x = wsgi.extract_path_info("http://example.com/app/", "https://example.com/app")
-    assert x == "/"
-    x = wsgi.extract_path_info("http://☃.net/", "/fööbär")
-    assert x == "/fööbär"
-    x = wsgi.extract_path_info("http://☃.net/x", "http://☃.net/x/fööbär")
-    assert x == "/fööbär"
+def test_limited_stream_read_with_raw_io():
+    class OneByteStream(t.BinaryIO):
+        def __init__(self, buf: bytes) -> None:
+            self.buf = buf
+            self.pos = 0
 
-    env = create_environ("/fööbär", "http://☃.net/x/")
-    x = wsgi.extract_path_info(env, "http://☃.net/x/fööbär")
-    assert x == "/fööbär"
+        def read(self, size: int | None = None) -> bytes:
+            """Return one byte at a time regardless of requested size."""
 
-    x = wsgi.extract_path_info("http://example.com/app/", "https://example.com/a/hello")
-    assert x is None
-    x = wsgi.extract_path_info(
-        "http://example.com/app/",
-        "https://example.com/app/hello",
-        collapse_http_schemes=False,
-    )
-    assert x is None
+            if size is None or size == -1:
+                raise ValueError("expected read to be called with specific limit")
+
+            if size == 0 or len(self.buf) < self.pos:
+                return b""
+
+            b = self.buf[self.pos : self.pos + 1]
+            self.pos += 1
+            return b
+
+    stream = wsgi.LimitedStream(OneByteStream(b"foo"), 4)
+    assert stream.read(5) == b"f"
+    assert stream.read(5) == b"o"
+    assert stream.read(5) == b"o"
+
+    # The stream has fewer bytes (3) than the limit (4), therefore the read returns 0
+    # bytes before the limit is reached.
+    with pytest.raises(ClientDisconnected):
+        stream.read(5)
+
+    stream = wsgi.LimitedStream(OneByteStream(b"foo123"), 3)
+    assert stream.read(5) == b"f"
+    assert stream.read(5) == b"o"
+    assert stream.read(5) == b"o"
+    # The limit was reached, therefore the wrapper is exhausted, not disconnected.
+    assert stream.read(5) == b""
+
+    stream = wsgi.LimitedStream(OneByteStream(b"foo"), 3)
+    assert stream.read() == b"foo"
+
+    stream = wsgi.LimitedStream(OneByteStream(b"foo"), 2)
+    assert stream.read() == b"fo"
 
 
 def test_get_host_fallback():
@@ -288,123 +254,6 @@ def test_get_current_url_invalid_utf8():
     rv = wsgi.get_current_url(env)
     # it remains percent-encoded
     assert rv == "http://localhost/?foo=bar&baz=blah&meh=%CF"
-
-
-def test_multi_part_line_breaks():
-    data = "abcdef\r\nghijkl\r\nmnopqrstuvwxyz\r\nABCDEFGHIJK"
-    test_stream = io.StringIO(data)
-    lines = list(wsgi.make_line_iter(test_stream, limit=len(data), buffer_size=16))
-    assert lines == ["abcdef\r\n", "ghijkl\r\n", "mnopqrstuvwxyz\r\n", "ABCDEFGHIJK"]
-
-    data = "abc\r\nThis line is broken by the buffer length.\r\nFoo bar baz"
-    test_stream = io.StringIO(data)
-    lines = list(wsgi.make_line_iter(test_stream, limit=len(data), buffer_size=24))
-    assert lines == [
-        "abc\r\n",
-        "This line is broken by the buffer length.\r\n",
-        "Foo bar baz",
-    ]
-
-
-def test_multi_part_line_breaks_bytes():
-    data = b"abcdef\r\nghijkl\r\nmnopqrstuvwxyz\r\nABCDEFGHIJK"
-    test_stream = io.BytesIO(data)
-    lines = list(wsgi.make_line_iter(test_stream, limit=len(data), buffer_size=16))
-    assert lines == [
-        b"abcdef\r\n",
-        b"ghijkl\r\n",
-        b"mnopqrstuvwxyz\r\n",
-        b"ABCDEFGHIJK",
-    ]
-
-    data = b"abc\r\nThis line is broken by the buffer length.\r\nFoo bar baz"
-    test_stream = io.BytesIO(data)
-    lines = list(wsgi.make_line_iter(test_stream, limit=len(data), buffer_size=24))
-    assert lines == [
-        b"abc\r\n",
-        b"This line is broken by the buffer length.\r\n",
-        b"Foo bar baz",
-    ]
-
-
-def test_multi_part_line_breaks_problematic():
-    data = "abc\rdef\r\nghi"
-    for _ in range(1, 10):
-        test_stream = io.StringIO(data)
-        lines = list(wsgi.make_line_iter(test_stream, limit=len(data), buffer_size=4))
-        assert lines == ["abc\r", "def\r\n", "ghi"]
-
-
-def test_iter_functions_support_iterators():
-    data = ["abcdef\r\nghi", "jkl\r\nmnopqrstuvwxyz\r", "\nABCDEFGHIJK"]
-    lines = list(wsgi.make_line_iter(data))
-    assert lines == ["abcdef\r\n", "ghijkl\r\n", "mnopqrstuvwxyz\r\n", "ABCDEFGHIJK"]
-
-
-def test_make_chunk_iter():
-    data = ["abcdefXghi", "jklXmnopqrstuvwxyzX", "ABCDEFGHIJK"]
-    rv = list(wsgi.make_chunk_iter(data, "X"))
-    assert rv == ["abcdef", "ghijkl", "mnopqrstuvwxyz", "ABCDEFGHIJK"]
-
-    data = "abcdefXghijklXmnopqrstuvwxyzXABCDEFGHIJK"
-    test_stream = io.StringIO(data)
-    rv = list(wsgi.make_chunk_iter(test_stream, "X", limit=len(data), buffer_size=4))
-    assert rv == ["abcdef", "ghijkl", "mnopqrstuvwxyz", "ABCDEFGHIJK"]
-
-
-def test_make_chunk_iter_bytes():
-    data = [b"abcdefXghi", b"jklXmnopqrstuvwxyzX", b"ABCDEFGHIJK"]
-    rv = list(wsgi.make_chunk_iter(data, "X"))
-    assert rv == [b"abcdef", b"ghijkl", b"mnopqrstuvwxyz", b"ABCDEFGHIJK"]
-
-    data = b"abcdefXghijklXmnopqrstuvwxyzXABCDEFGHIJK"
-    test_stream = io.BytesIO(data)
-    rv = list(wsgi.make_chunk_iter(test_stream, "X", limit=len(data), buffer_size=4))
-    assert rv == [b"abcdef", b"ghijkl", b"mnopqrstuvwxyz", b"ABCDEFGHIJK"]
-
-    data = b"abcdefXghijklXmnopqrstuvwxyzXABCDEFGHIJK"
-    test_stream = io.BytesIO(data)
-    rv = list(
-        wsgi.make_chunk_iter(
-            test_stream, "X", limit=len(data), buffer_size=4, cap_at_buffer=True
-        )
-    )
-    assert rv == [
-        b"abcd",
-        b"ef",
-        b"ghij",
-        b"kl",
-        b"mnop",
-        b"qrst",
-        b"uvwx",
-        b"yz",
-        b"ABCD",
-        b"EFGH",
-        b"IJK",
-    ]
-
-
-def test_lines_longer_buffer_size():
-    data = "1234567890\n1234567890\n"
-    for bufsize in range(1, 15):
-        lines = list(
-            wsgi.make_line_iter(io.StringIO(data), limit=len(data), buffer_size=bufsize)
-        )
-        assert lines == ["1234567890\n", "1234567890\n"]
-
-
-def test_lines_longer_buffer_size_cap():
-    data = "1234567890\n1234567890\n"
-    for bufsize in range(1, 15):
-        lines = list(
-            wsgi.make_line_iter(
-                io.StringIO(data),
-                limit=len(data),
-                buffer_size=bufsize,
-                cap_at_buffer=True,
-            )
-        )
-        assert len(lines[0]) == bufsize or lines[0].endswith("\n")
 
 
 def test_range_wrapper():

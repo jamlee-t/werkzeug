@@ -18,10 +18,10 @@ requests.
 >>> response = c.get("/")
 >>> response.status_code
 200
->>> resp.headers
-Headers([('Content-Type', 'text/html; charset=utf-8'), ('Content-Length', '6658')])
+>>> response.headers
+Headers([('Content-Type', 'text/html; charset=utf-8'), ('Content-Length', '5211')])
 >>> response.get_data(as_text=True)
-'<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"...'
+'<!doctype html>...'
 
 The client's request methods return instances of :class:`TestResponse`.
 This provides extra attributes and methods on top of
@@ -99,6 +99,10 @@ API
     :member-order: bysource
 
 .. autoclass:: TestResponse
+    :members:
+    :member-order: bysource
+
+.. autoclass:: Cookie
     :members:
     :member-order: bysource
 

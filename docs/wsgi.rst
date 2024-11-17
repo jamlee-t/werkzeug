@@ -22,10 +22,6 @@ iterator and the input stream.
 .. autoclass:: LimitedStream
     :members:
 
-.. autofunction:: make_line_iter
-
-.. autofunction:: make_chunk_iter
-
 .. autofunction:: wrap_file
 
 
@@ -42,18 +38,6 @@ information or perform common manipulations:
 .. autofunction:: get_input_stream
 
 .. autofunction:: get_current_url
-
-.. autofunction:: get_query_string
-
-.. autofunction:: get_script_name
-
-.. autofunction:: get_path_info
-
-.. autofunction:: pop_path_info
-
-.. autofunction:: peek_path_info
-
-.. autofunction:: extract_path_info
 
 .. autofunction:: host_is_trusted
 

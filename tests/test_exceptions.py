@@ -1,10 +1,13 @@
 from datetime import datetime
 
 import pytest
+from markupsafe import escape
+from markupsafe import Markup
 
 from werkzeug import exceptions
 from werkzeug.datastructures import Headers
 from werkzeug.datastructures import WWWAuthenticate
+from werkzeug.exceptions import default_exceptions
 from werkzeug.exceptions import HTTPException
 from werkzeug.wrappers import Response
 
@@ -34,6 +37,7 @@ def test_proxy_exception():
         (exceptions.RequestEntityTooLarge, 413),
         (exceptions.RequestURITooLarge, 414),
         (exceptions.UnsupportedMediaType, 415),
+        (exceptions.MisdirectedRequest, 421),
         (exceptions.UnprocessableEntity, 422),
         (exceptions.Locked, 423),
         (exceptions.InternalServerError, 500),
@@ -49,6 +53,13 @@ def test_aborter_general(test):
     with pytest.raises(exc_type) as exc_info:
         exceptions.abort(*args)
     assert type(exc_info.value) is exc_type
+
+
+def test_abort_description_markup():
+    with pytest.raises(HTTPException) as exc_info:
+        exceptions.abort(400, Markup("<b>&lt;</b>"))
+
+    assert "<b>&lt;</b>" in str(exc_info.value)
 
 
 def test_aborter_custom():
@@ -87,10 +98,8 @@ def test_method_not_allowed_methods():
 
 
 def test_unauthorized_www_authenticate():
-    basic = WWWAuthenticate()
-    basic.set_basic("test")
-    digest = WWWAuthenticate()
-    digest.set_digest("test", "test")
+    basic = WWWAuthenticate("basic", {"realm": "test"})
+    digest = WWWAuthenticate("digest", {"realm": "test", "nonce": "test"})
 
     exc = exceptions.Unauthorized(www_authenticate=basic)
     h = Headers(exc.get_headers({}))
@@ -131,7 +140,7 @@ def test_retry_after_mixin(cls, value, expect):
 @pytest.mark.parametrize(
     "cls",
     sorted(
-        (e for e in HTTPException.__subclasses__() if e.code and e.code >= 400),
+        (e for e in default_exceptions.values() if e.code and e.code >= 400),
         key=lambda e: e.code,  # type: ignore
     ),
 )
@@ -146,3 +155,18 @@ def test_passing_response(cls):
 
 def test_description_none():
     HTTPException().get_response()
+
+
+@pytest.mark.parametrize(
+    "cls",
+    sorted(
+        (e for e in default_exceptions.values() if e.code),
+        key=lambda e: e.code,  # type: ignore
+    ),
+)
+def test_response_body(cls):
+    exc = cls()
+    response_body = exc.get_body()
+    assert response_body.startswith("<!doctype html>\n<html lang=en>\n")
+    assert f"{exc.code} {escape(exc.name)}" in response_body
+    assert exc.get_description() in response_body

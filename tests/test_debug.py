@@ -1,4 +1,3 @@
-import io
 import re
 import sys
 
@@ -6,14 +5,13 @@ import pytest
 
 from werkzeug.debug import console
 from werkzeug.debug import DebuggedApplication
-from werkzeug.debug import get_current_traceback
+from werkzeug.debug import DebugTraceback
 from werkzeug.debug import get_machine_id
 from werkzeug.debug.console import HTMLStringO
 from werkzeug.debug.repr import debug_repr
 from werkzeug.debug.repr import DebugReprGenerator
 from werkzeug.debug.repr import dump
 from werkzeug.debug.repr import helper
-from werkzeug.debug.tbtools import Traceback
 from werkzeug.test import Client
 from werkzeug.wrappers import Request
 
@@ -26,20 +24,20 @@ class TestDebugRepr:
         )
         assert debug_repr([1, "test"]) == (
             '[<span class="number">1</span>,'
-            ' <span class="string">&#x27;test&#x27;</span>]'
+            ' <span class="string">&#39;test&#39;</span>]'
         )
         assert debug_repr([None]) == '[<span class="object">None</span>]'
 
     def test_string_repr(self):
-        assert debug_repr("") == '<span class="string">&#x27;&#x27;</span>'
-        assert debug_repr("foo") == '<span class="string">&#x27;foo&#x27;</span>'
+        assert debug_repr("") == '<span class="string">&#39;&#39;</span>'
+        assert debug_repr("foo") == '<span class="string">&#39;foo&#39;</span>'
         assert debug_repr("s" * 80) == (
-            f'<span class="string">&#x27;{"s" * 69}'
-            f'<span class="extended">{"s" * 11}&#x27;</span></span>'
+            f'<span class="string">&#39;{"s" * 69}'
+            f'<span class="extended">{"s" * 11}&#39;</span></span>'
         )
         assert debug_repr("<" * 80) == (
-            f'<span class="string">&#x27;{"&lt;" * 69}'
-            f'<span class="extended">{"&lt;" * 11}&#x27;</span></span>'
+            f'<span class="string">&#39;{"&lt;" * 69}'
+            f'<span class="extended">{"&lt;" * 11}&#39;</span></span>'
         )
 
     def test_string_subclass_repr(self):
@@ -48,7 +46,7 @@ class TestDebugRepr:
 
         assert debug_repr(Test("foo")) == (
             '<span class="module">test_debug.</span>'
-            'Test(<span class="string">&#x27;foo&#x27;</span>)'
+            'Test(<span class="string">&#39;foo&#39;</span>)'
         )
 
     def test_sequence_repr(self):
@@ -69,7 +67,7 @@ class TestDebugRepr:
     def test_mapping_repr(self):
         assert debug_repr({}) == "{}"
         assert debug_repr({"foo": 42}) == (
-            '{<span class="pair"><span class="key"><span class="string">&#x27;foo&#x27;'
+            '{<span class="pair"><span class="key"><span class="string">&#39;foo&#39;'
             '</span></span>: <span class="value"><span class="number">42'
             "</span></span></span>}"
         )
@@ -107,8 +105,8 @@ class TestDebugRepr:
             "</span></span></span></span>}"
         )
         assert debug_repr((1, "zwei", "drei")) == (
-            '(<span class="number">1</span>, <span class="string">&#x27;'
-            'zwei&#x27;</span>, <span class="string">&#x27;drei&#x27;</span>)'
+            '(<span class="number">1</span>, <span class="string">&#39;'
+            'zwei&#39;</span>, <span class="string">&#39;drei&#39;</span>)'
         )
 
     def test_custom_repr(self):
@@ -141,10 +139,10 @@ class TestDebugRepr:
     def test_set_repr(self):
         assert (
             debug_repr(frozenset("x"))
-            == 'frozenset([<span class="string">&#x27;x&#x27;</span>])'
+            == 'frozenset([<span class="string">&#39;x&#39;</span>])'
         )
         assert debug_repr(set("x")) == (
-            'set([<span class="string">&#x27;x&#x27;</span>])'
+            'set([<span class="string">&#39;x&#39;</span>])'
         )
 
     def test_recursive_repr(self):
@@ -242,69 +240,13 @@ class TestDebugHelpers:
         assert 'raise KeyError("outer")' in data
 
 
-class TestTraceback:
-    def test_log(self):
-        try:
-            1 / 0
-        except ZeroDivisionError:
-            traceback = Traceback(*sys.exc_info())
-
-        buffer_ = io.StringIO()
-        traceback.log(buffer_)
-        assert buffer_.getvalue().strip() == traceback.plaintext.strip()
-
-    def test_sourcelines_encoding(self):
-        source = (
-            "# -*- coding: latin1 -*-\n\n"
-            "def foo():\n"
-            '    """höhö"""\n'
-            "    1 / 0\n"
-            "foo()"
-        ).encode("latin1")
-        code = compile(source, filename="lol.py", mode="exec")
-        try:
-            eval(code)
-        except ZeroDivisionError:
-            traceback = Traceback(*sys.exc_info())
-
-        frames = traceback.frames
-        assert len(frames) == 3
-        assert frames[1].filename == "lol.py"
-        assert frames[2].filename == "lol.py"
-
-        class Loader:
-            def get_source(self, module):
-                return source
-
-        frames[1].loader = frames[2].loader = Loader()
-        assert frames[1].sourcelines == frames[2].sourcelines
-        assert [line.code for line in frames[1].get_annotated_lines()] == [
-            line.code for line in frames[2].get_annotated_lines()
-        ]
-        assert "höhö" in frames[1].sourcelines[3]
-
-    def test_filename_encoding(self, tmpdir, monkeypatch):
-        moduledir = tmpdir.mkdir("föö")
-        moduledir.join("bar.py").write("def foo():\n    1/0\n")
-        monkeypatch.syspath_prepend(str(moduledir))
-
-        import bar  # type: ignore
-
-        try:
-            bar.foo()
-        except ZeroDivisionError:
-            traceback = Traceback(*sys.exc_info())
-
-        assert "föö" in "\n".join(frame.render() for frame in traceback.frames)
-
-
 def test_get_machine_id():
     rv = get_machine_id()
     assert isinstance(rv, bytes)
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 @pytest.mark.parametrize("crash", (True, False))
+@pytest.mark.dev_server
 def test_basic(dev_server, crash):
     c = dev_server(use_debugger=True)
     r = c.request("/crash" if crash else "")
@@ -338,19 +280,8 @@ def test_chained_exception_cycle():
         e.__context__.__context__ = error = e
 
     # if cycles aren't broken, this will time out
-    tb = Traceback(TypeError, error, error.__traceback__)
-    assert len(tb.groups) == 2
-
-
-def test_non_hashable_exception():
-    class MutableException(ValueError):
-        __hash__ = None
-
-    try:
-        raise MutableException()
-    except MutableException:
-        # previously crashed: `TypeError: unhashable type 'MutableException'`
-        Traceback(*sys.exc_info())
+    tb = DebugTraceback(error)
+    assert len(tb.all_tracebacks) == 2
 
 
 def test_exception_without_traceback():
@@ -359,4 +290,4 @@ def test_exception_without_traceback():
     except Exception as e:
         # filter_hidden_frames should skip this since it has no traceback
         e.__context__ = Exception("msg2")
-        get_current_traceback()
+        DebugTraceback(e)

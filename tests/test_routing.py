@@ -1,4 +1,5 @@
 import gc
+import typing as t
 import uuid
 
 import pytest
@@ -6,6 +7,8 @@ import pytest
 from werkzeug import routing as r
 from werkzeug.datastructures import ImmutableDict
 from werkzeug.datastructures import MultiDict
+from werkzeug.exceptions import MethodNotAllowed
+from werkzeug.exceptions import NotFound
 from werkzeug.test import create_environ
 from werkzeug.wrappers import Response
 
@@ -25,7 +28,7 @@ def test_basic_routing():
     assert adapter.match("/foo") == ("foo", {})
     assert adapter.match("/bar/") == ("bar", {})
     pytest.raises(r.RequestRedirect, lambda: adapter.match("/bar"))
-    pytest.raises(r.NotFound, lambda: adapter.match("/blub"))
+    pytest.raises(NotFound, lambda: adapter.match("/blub"))
 
     adapter = map.bind("example.org", "/", url_scheme="ws")
     assert adapter.match("/") == ("indexws", {})
@@ -92,6 +95,7 @@ def test_merge_slashes_match():
             r.Rule("/yes/tail/", endpoint="yes_tail"),
             r.Rule("/with/<path:path>", endpoint="with_path"),
             r.Rule("/no//merge", endpoint="no_merge", merge_slashes=False),
+            r.Rule("/no/merging", endpoint="no_merging", merge_slashes=False),
         ]
     )
     adapter = url_map.bind("localhost", "/")
@@ -120,6 +124,9 @@ def test_merge_slashes_match():
     assert rv["path"] == "x//y"
 
     assert adapter.match("/no//merge")[0] == "no_merge"
+
+    assert adapter.match("/no/merging")[0] == "no_merging"
+    pytest.raises(NotFound, lambda: adapter.match("/no//merging"))
 
 
 @pytest.mark.parametrize(
@@ -160,6 +167,7 @@ def test_strict_slashes_redirect():
             r.Rule("/bar/", endpoint="get", methods=["GET"]),
             r.Rule("/bar", endpoint="post", methods=["POST"]),
             r.Rule("/foo/", endpoint="foo", methods=["POST"]),
+            r.Rule("/<path:var>/", endpoint="path", methods=["GET"]),
         ]
     )
     adapter = map.bind("example.org", "/")
@@ -167,13 +175,17 @@ def test_strict_slashes_redirect():
     # Check if the actual routes works
     assert adapter.match("/bar/", method="GET") == ("get", {})
     assert adapter.match("/bar", method="POST") == ("post", {})
+    assert adapter.match("/abc/", method="GET") == ("path", {"var": "abc"})
 
     # Check if exceptions are correct
     pytest.raises(r.RequestRedirect, adapter.match, "/bar", method="GET")
-    pytest.raises(r.MethodNotAllowed, adapter.match, "/bar/", method="POST")
+    pytest.raises(MethodNotAllowed, adapter.match, "/bar/", method="POST")
     with pytest.raises(r.RequestRedirect) as error_info:
         adapter.match("/foo", method="POST")
     assert error_info.value.code == 308
+    with pytest.raises(r.RequestRedirect) as error_info:
+        adapter.match("/abc", method="GET")
+    assert error_info.value.new_url == "http://example.org/abc/"
 
     # Check differently defined order
     map = r.Map(
@@ -190,7 +202,7 @@ def test_strict_slashes_redirect():
 
     # Check if exceptions are correct
     pytest.raises(r.RequestRedirect, adapter.match, "/bar", method="GET")
-    pytest.raises(r.MethodNotAllowed, adapter.match, "/bar/", method="POST")
+    pytest.raises(MethodNotAllowed, adapter.match, "/bar/", method="POST")
 
     # Check what happens when only slash route is defined
     map = r.Map([r.Rule("/bar/", endpoint="get", methods=["GET"])])
@@ -201,8 +213,37 @@ def test_strict_slashes_redirect():
 
     # Check if exceptions are correct
     pytest.raises(r.RequestRedirect, adapter.match, "/bar", method="GET")
-    pytest.raises(r.MethodNotAllowed, adapter.match, "/bar/", method="POST")
-    pytest.raises(r.MethodNotAllowed, adapter.match, "/bar", method="POST")
+    pytest.raises(MethodNotAllowed, adapter.match, "/bar/", method="POST")
+
+
+def test_strict_slashes_leaves_dont_consume():
+    # See issue #1074
+    map = r.Map(
+        [
+            r.Rule("/path1", endpoint="leaf"),
+            r.Rule("/path1/", endpoint="branch"),
+            r.Rule("/path2", endpoint="leaf", strict_slashes=False),
+            r.Rule("/path2/", endpoint="branch"),
+            r.Rule("/path3", endpoint="leaf"),
+            r.Rule("/path3/", endpoint="branch", strict_slashes=False),
+            r.Rule("/path4", endpoint="leaf", strict_slashes=False),
+            r.Rule("/path4/", endpoint="branch", strict_slashes=False),
+            r.Rule("/path5", endpoint="leaf"),
+        ],
+        strict_slashes=False,
+    )
+
+    adapter = map.bind("example.org", "/")
+
+    assert adapter.match("/path1", method="GET") == ("leaf", {})
+    assert adapter.match("/path1/", method="GET") == ("branch", {})
+    assert adapter.match("/path2", method="GET") == ("leaf", {})
+    assert adapter.match("/path2/", method="GET") == ("branch", {})
+    assert adapter.match("/path3", method="GET") == ("leaf", {})
+    assert adapter.match("/path3/", method="GET") == ("branch", {})
+    assert adapter.match("/path4", method="GET") == ("leaf", {})
+    assert adapter.match("/path4/", method="GET") == ("branch", {})
+    assert adapter.match("/path5/", method="GET") == ("leaf", {})
 
 
 def test_environ_defaults():
@@ -213,7 +254,7 @@ def test_environ_defaults():
     assert a.match("/foo") == ("foo", {})
     assert a.match() == ("foo", {})
     assert a.match("/bar") == ("bar", {})
-    pytest.raises(r.NotFound, a.match, "/bars")
+    pytest.raises(NotFound, a.match, "/bars")
 
 
 def test_environ_nonascii_pathinfo():
@@ -222,7 +263,7 @@ def test_environ_nonascii_pathinfo():
     a = m.bind_to_environ(environ)
     assert a.match("/") == ("index", {})
     assert a.match("/лошадь") == ("horse", {})
-    pytest.raises(r.NotFound, a.match, "/барсук")
+    pytest.raises(NotFound, a.match, "/барсук")
 
 
 def test_basic_building():
@@ -329,10 +370,10 @@ def test_negative():
     assert adapter.match("/bars/-0.185") == ("bars", {"page": -0.185})
 
     # Make sure signed values are rejected in unsigned mode
-    pytest.raises(r.NotFound, lambda: adapter.match("/foo/-2"))
-    pytest.raises(r.NotFound, lambda: adapter.match("/foo/-50"))
-    pytest.raises(r.NotFound, lambda: adapter.match("/bar/-0.185"))
-    pytest.raises(r.NotFound, lambda: adapter.match("/bar/-2.0"))
+    pytest.raises(NotFound, lambda: adapter.match("/foo/-2"))
+    pytest.raises(NotFound, lambda: adapter.match("/foo/-50"))
+    pytest.raises(NotFound, lambda: adapter.match("/bar/-0.185"))
+    pytest.raises(NotFound, lambda: adapter.match("/bar/-2.0"))
 
 
 def test_greedy():
@@ -434,8 +475,8 @@ def test_dispatch():
 
     assert dispatch("/").data == b"('root', {})"
     assert dispatch("/foo").status_code == 308
-    raise_this = r.NotFound()
-    pytest.raises(r.NotFound, lambda: dispatch("/bar"))
+    raise_this = NotFound()
+    pytest.raises(NotFound, lambda: dispatch("/bar"))
     assert dispatch("/bar", True).status_code == 404
 
 
@@ -549,7 +590,8 @@ def test_server_name_interpolation():
 
     with pytest.warns(UserWarning):
         adapter = map.bind_to_environ(env, server_name="foo")
-        assert adapter.subdomain == "<invalid>"
+
+    assert adapter.subdomain == "<invalid>"
 
 
 def test_rule_emptying():
@@ -710,7 +752,7 @@ def test_uuid_converter():
     m = r.Map([r.Rule("/a/<uuid:a_uuid>", endpoint="a")])
     a = m.bind("example.org", "/")
     route, kwargs = a.match("/a/a8098c1a-f86e-11da-bd1a-00112444be1e")
-    assert type(kwargs["a_uuid"]) == uuid.UUID
+    assert type(kwargs["a_uuid"]) == uuid.UUID  # noqa: E721
 
 
 def test_converter_with_tuples():
@@ -719,6 +761,8 @@ def test_converter_with_tuples():
     """
 
     class TwoValueConverter(r.BaseConverter):
+        part_isolating = False
+
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.regex = r"(\w\w+)/(\w\w+)"
@@ -739,6 +783,35 @@ def test_converter_with_tuples():
     assert kwargs["foo"] == ("qwert", "yuiop")
 
 
+def test_nested_regex_groups():
+    """
+    Regression test for https://github.com/pallets/werkzeug/issues/2590
+    """
+
+    class RegexConverter(r.BaseConverter):
+        def __init__(self, url_map, *items):
+            super().__init__(url_map)
+            self.part_isolating = False
+            self.regex = items[0]
+
+    # This is a regex pattern with nested groups
+    DATE_PATTERN = r"((\d{8}T\d{6}([.,]\d{1,3})?)|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([.,]\d{1,3})?))Z"  # noqa: E501
+
+    map = r.Map(
+        [
+            r.Rule(
+                f"/<regex('{DATE_PATTERN}'):start>/<regex('{DATE_PATTERN}'):end>/",
+                endpoint="handler",
+            )
+        ],
+        converters={"regex": RegexConverter},
+    )
+    a = map.bind("example.org", "/")
+    route, kwargs = a.match("/2023-02-16T23:36:36.266Z/2023-02-16T23:46:36.266Z/")
+    assert kwargs["start"] == "2023-02-16T23:36:36.266Z"
+    assert kwargs["end"] == "2023-02-16T23:46:36.266Z"
+
+
 def test_anyconverter():
     m = r.Map(
         [
@@ -753,49 +826,137 @@ def test_anyconverter():
     assert a.match("/a.2") == ("yes_dot", {"a": "a.2"})
 
 
+def test_any_converter_build_validates_value() -> None:
+    m = r.Map([r.Rule("/<any(patient, provider):value>", endpoint="actor")])
+    a = m.bind("localhost")
+
+    assert a.build("actor", {"value": "patient"}) == "/patient"
+    assert a.build("actor", {"value": "provider"}) == "/provider"
+
+    with pytest.raises(ValueError) as exc:
+        a.build("actor", {"value": "invalid"})
+
+    assert str(exc.value) == "'invalid' is not one of 'patient', 'provider'"
+
+
+def test_part_isolating_default() -> None:
+    class TwoConverter(r.BaseConverter):
+        regex = r"\w+/\w+"
+
+        def to_python(self, value: str) -> t.Any:
+            return value.split("/")
+
+    m = r.Map(
+        [r.Rule("/<two:values>/", endpoint="two")], converters={"two": TwoConverter}
+    )
+    a = m.bind("localhost")
+    assert a.match("/a/b/") == ("two", {"values": ["a", "b"]})
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "value", "expect"),
+    [
+        ("int", 1, "/1"),
+        ("int", None, r.BuildError),
+        ("int", [1], TypeError),
+        ("list", [1], "/1"),
+        ("list", [1, None, 2], "/1.None.2"),
+        ("list", 1, TypeError),
+    ],
+)
+def test_build_values_dict(endpoint, value, expect):
+    class ListConverter(r.BaseConverter):
+        def to_url(self, value: t.Any) -> str:
+            return super().to_url(".".join(map(str, value)))
+
+    url_map = r.Map(
+        [r.Rule("/<int:v>", endpoint="int"), r.Rule("/<list:v>", endpoint="list")],
+        converters={"list": ListConverter},
+    )
+    adapter = url_map.bind("localhost")
+
+    if isinstance(expect, str):
+        assert adapter.build(endpoint, {"v": value}) == expect
+    else:
+        with pytest.raises(expect):
+            adapter.build(endpoint, {"v": value})
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "value", "expect"),
+    [
+        ("int", 1, "/1"),
+        ("int", [1], "/1"),
+        ("int", [], r.BuildError),
+        ("int", None, TypeError),
+        ("int", [None], TypeError),
+        ("list", 1, TypeError),
+        ("list", [1], TypeError),
+        ("list", [[1]], "/1"),
+        ("list", [1, None, 2], "/1.None.2"),
+    ],
+)
+def test_build_values_multidict(endpoint, value, expect):
+    class ListConverter(r.BaseConverter):
+        def to_url(self, value: t.Any) -> str:
+            return super().to_url(".".join(map(str, value)))
+
+    url_map = r.Map(
+        [r.Rule("/<int:v>", endpoint="int"), r.Rule("/<list:v>", endpoint="list")],
+        converters={"list": ListConverter},
+    )
+    adapter = url_map.bind("localhost")
+
+    if isinstance(expect, str):
+        assert adapter.build(endpoint, MultiDict({"v": value})) == expect
+    else:
+        with pytest.raises(expect):
+            adapter.build(endpoint, MultiDict({"v": value}))
+
+
 @pytest.mark.parametrize(
     ("value", "expect"),
     [
         (None, ""),
         ([None], ""),
         ([None, None], ""),
-        ("", "?extra="),
-        ([""], "?extra="),
-        (1.0, "?extra=1.0"),
-        ([1, 2], "?extra=1&extra=2"),
-        ([1, None, 2], "?extra=1&extra=2"),
-        ([1, "", 2], "?extra=1&extra=&extra=2"),
+        ("", "?v="),
+        ([""], "?v="),
+        (0, "?v=0"),
+        (1.0, "?v=1.0"),
+        ([1, 2], "?v=1&v=2"),
+        ([1, None, 2], "?v=1&v=2"),
+        ([1, "", 2], "?v=1&v=&v=2"),
+        ("1+2", "?v=1%2B2"),
     ],
 )
-def test_build_append_unknown(value, expect):
-    map = r.Map([r.Rule("/foo/<name>", endpoint="foo")])
-    adapter = map.bind("example.org", "/", subdomain="test")
-    assert (
-        adapter.build("foo", {"name": "bar", "extra": value})
-        == f"http://example.org/foo/bar{expect}"
-    )
-    assert (
-        adapter.build("foo", {"name": "bar", "extra": value}, append_unknown=False)
-        == "http://example.org/foo/bar"
-    )
+def test_build_append_unknown_dict(value, expect):
+    map = r.Map([r.Rule("/", endpoint="a")])
+    adapter = map.bind("localhost")
+    assert adapter.build("a", {"v": value}) == f"/{expect}"
+    assert adapter.build("a", {"v": value}, append_unknown=False) == "/"
 
 
-def test_build_append_multiple():
-    map = r.Map([r.Rule("/bar/<float:foo>", endpoint="endp")])
-    adapter = map.bind("example.org", "/", subdomain="subd")
-    params = {"foo": 0.815, "x": [1.0, 3.0], "y": 2.0}
-    a, b = adapter.build("endp", params).split("?")
-    assert a == "http://example.org/bar/0.815"
-    assert set(b.split("&")) == set("y=2.0&x=1.0&x=3.0".split("&"))
-
-
-def test_build_append_multidict():
-    map = r.Map([r.Rule("/bar/<float:foo>", endpoint="endp")])
-    adapter = map.bind("example.org", "/", subdomain="subd")
-    params = MultiDict((("foo", 0.815), ("x", 1.0), ("x", 3.0), ("y", 2.0)))
-    a, b = adapter.build("endp", params).split("?")
-    assert a == "http://example.org/bar/0.815"
-    assert set(b.split("&")) == set("y=2.0&x=1.0&x=3.0".split("&"))
+@pytest.mark.parametrize(
+    ("value", "expect"),
+    [
+        (None, ""),
+        ([None], ""),
+        ([None, None], ""),
+        ("", "?v="),
+        ([""], "?v="),
+        (0, "?v=0"),
+        (1.0, "?v=1.0"),
+        ([1, 2], "?v=1&v=2"),
+        ([1, None, 2], "?v=1&v=2"),
+        ([1, "", 2], "?v=1&v=&v=2"),
+    ],
+)
+def test_build_append_unknown_multidict(value, expect):
+    map = r.Map([r.Rule("/", endpoint="a")])
+    adapter = map.bind("localhost")
+    assert adapter.build("a", MultiDict({"v": value})) == f"/{expect}"
+    assert adapter.build("a", MultiDict({"v": value}), append_unknown=False) == "/"
 
 
 def test_build_drop_none():
@@ -803,8 +964,7 @@ def test_build_drop_none():
     adapter = map.bind("", "/")
     params = {"flub": None, "flop": None}
     with pytest.raises(r.BuildError):
-        x = adapter.build("endp", params)
-        assert not x
+        adapter.build("endp", params)
     params = {"flub": "x", "flop": None}
     url = adapter.build("endp", params)
     assert "flop" not in url
@@ -840,7 +1000,7 @@ def test_implicit_head():
     )
     adapter = url_map.bind("example.org")
     assert adapter.match("/get", method="HEAD") == ("a", {})
-    pytest.raises(r.MethodNotAllowed, adapter.match, "/post", method="HEAD")
+    pytest.raises(MethodNotAllowed, adapter.match, "/post", method="HEAD")
 
 
 def test_pass_str_as_router_methods():
@@ -885,7 +1045,16 @@ def test_external_building_with_port_bind_to_environ_wrong_servername():
 
     with pytest.warns(UserWarning):
         adapter = map.bind_to_environ(environ, server_name="example.org")
-        assert adapter.subdomain == "<invalid>"
+
+    assert adapter.subdomain == "<invalid>"
+
+
+def test_bind_long_idna_name_with_port():
+    map = r.Map([r.Rule("/", endpoint="index")])
+    adapter = map.bind("🐍" + "a" * 52 + ":8443")
+    name, _, port = adapter.server_name.partition(":")
+    assert len(name) == 63
+    assert port == "8443"
 
 
 def test_converter_parser():
@@ -906,6 +1075,9 @@ def test_converter_parser():
 
     args, kwargs = r.parse_converter_args('"foo", "bar"')
     assert args == ("foo", "bar")
+
+    with pytest.raises(ValueError):
+        r.parse_converter_args("min=0;max=500")
 
 
 def test_alias_redirects():
@@ -962,18 +1134,6 @@ def test_double_defaults(prefix):
     assert a.build("x", {"foo": 1, "bar": True}) == f"{prefix}/bar/"
     assert a.build("x", {"foo": 2, "bar": True}) == f"{prefix}/bar/2"
     assert a.build("x", {"bar": True}) == f"{prefix}/bar/"
-
-
-def test_building_bytes():
-    m = r.Map(
-        [
-            r.Rule("/<a>", endpoint="a"),
-            r.Rule("/<b>", defaults={"b": b"\x01\x02\x03"}, endpoint="b"),
-        ]
-    )
-    a = m.bind("example.org", "/")
-    assert a.build("a", {"a": b"\x01\x02\x03"}) == "/%01%02%03"
-    assert a.build("b") == "/%01%02%03"
 
 
 def test_host_matching():
@@ -1040,7 +1200,7 @@ def test_server_name_casing():
     with pytest.warns(UserWarning):
         a = m.bind_to_environ(env, server_name="example.com")
 
-    with pytest.raises(r.NotFound):
+    with pytest.raises(NotFound):
         a.match()
 
 
@@ -1120,7 +1280,7 @@ def test_both_bind_and_match_path_info_are_none():
 def test_map_repr():
     m = r.Map([r.Rule("/wat", endpoint="enter"), r.Rule("/woop", endpoint="foobar")])
     rv = repr(m)
-    assert rv == "Map([<Rule '/woop' -> foobar>, <Rule '/wat' -> enter>])"
+    assert rv == "Map([<Rule '/wat' -> enter>, <Rule '/woop' -> foobar>])"
 
 
 def test_empty_subclass_rules_with_custom_kwargs():
@@ -1285,3 +1445,109 @@ def test_rule_websocket_methods():
             methods=["get", "head", "options", "post"],
         )
     r.Rule("/ws", endpoint="ws", websocket=True, methods=["get", "head", "options"])
+
+
+def test_path_weighting():
+    m = r.Map(
+        [
+            r.Rule("/<path:path>/c", endpoint="simple"),
+            r.Rule("/<path:path>/<a>/<b>", endpoint="complex"),
+        ]
+    )
+    a = m.bind("localhost", path_info="/a/b/c")
+
+    assert a.match() == ("simple", {"path": "a/b"})
+
+
+def test_newline_match():
+    m = r.Map([r.Rule("/hello", endpoint="hello")])
+    a = m.bind("localhost")
+
+    with pytest.raises(NotFound):
+        a.match("/hello\n")
+
+
+def test_weighting():
+    m = r.Map(
+        [
+            r.Rule("/<int:value>", endpoint="int"),
+            r.Rule("/<uuid:value>", endpoint="uuid"),
+        ]
+    )
+    a = m.bind("localhost")
+
+    assert a.match("/2b5b0911-fdcf-4dd2-921b-28ace88db8a0") == (
+        "uuid",
+        {"value": uuid.UUID("2b5b0911-fdcf-4dd2-921b-28ace88db8a0")},
+    )
+
+
+def test_strict_slashes_false():
+    map = r.Map(
+        [
+            r.Rule("/path1", endpoint="leaf_path", strict_slashes=False),
+            r.Rule("/path2/", endpoint="branch_path", strict_slashes=False),
+            r.Rule(
+                "/<path:path>", endpoint="leaf_path_converter", strict_slashes=False
+            ),
+        ],
+    )
+
+    adapter = map.bind("example.org", "/")
+
+    assert adapter.match("/path1", method="GET") == ("leaf_path", {})
+    assert adapter.match("/path1/", method="GET") == ("leaf_path", {})
+    assert adapter.match("/path2", method="GET") == ("branch_path", {})
+    assert adapter.match("/path2/", method="GET") == ("branch_path", {})
+    assert adapter.match("/any", method="GET") == (
+        "leaf_path_converter",
+        {"path": "any"},
+    )
+    assert adapter.match("/any/", method="GET") == (
+        "leaf_path_converter",
+        {"path": "any/"},
+    )
+
+
+def test_invalid_rule():
+    with pytest.raises(ValueError):
+        r.Map([r.Rule("/<int()>", endpoint="test")])
+
+
+def test_multiple_converters_per_part():
+    map_ = r.Map(
+        [
+            r.Rule("/v<int:major>.<int:minor>", endpoint="version"),
+        ],
+    )
+    adapter = map_.bind("localhost")
+    assert adapter.match("/v1.2") == ("version", {"major": 1, "minor": 2})
+
+
+def test_static_regex_escape():
+    map_ = r.Map(
+        [
+            r.Rule("/.<int:value>", endpoint="dotted"),
+        ],
+    )
+    adapter = map_.bind("localhost")
+    assert adapter.match("/.2") == ("dotted", {"value": 2})
+    with pytest.raises(NotFound):
+        adapter.match("/a2")
+
+
+class RegexConverter(r.BaseConverter):
+    def __init__(self, url_map, *items):
+        super().__init__(url_map)
+        self.regex = items[0]
+
+
+def test_regex():
+    map_ = r.Map(
+        [
+            r.Rule(r"/<regex('[^/:]+\.[^/:]+'):value>", endpoint="regex"),
+        ],
+        converters={"regex": RegexConverter},
+    )
+    adapter = map_.bind("localhost")
+    assert adapter.match("/asdfsa.asdfs") == ("regex", {"value": "asdfsa.asdfs"})

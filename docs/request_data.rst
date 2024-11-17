@@ -73,23 +73,38 @@ read the stream *or* call :meth:`~Request.get_data`.
 Limiting Request Data
 ---------------------
 
-To avoid being the victim of a DDOS attack you can set the maximum
-accepted content length and request field sizes.  The :class:`Request`
-class has two attributes for that: :attr:`~Request.max_content_length`
-and :attr:`~Request.max_form_memory_size`.
+The :class:`Request` class provides a few attributes to control how much data is
+processed from the request body. This can help mitigate DoS attacks that craft the
+request in such a way that the server uses too many resources to handle it. Each of
+these limits will raise a :exc:`~werkzeug.exceptions.RequestEntityTooLarge` if they are
+exceeded.
 
-The first one can be used to limit the total content length.  For example
-by setting it to ``1024 * 1024 * 16`` the request won't accept more than
-16MB of transmitted data.
+-   :attr:`~Request.max_content_length` - Stop reading request data after this number
+    of bytes. It's better to configure this in the WSGI server or HTTP server, rather
+    than the WSGI application.
+-   :attr:`~Request.max_form_memory_size` - Stop reading request data if any
+    non-file form field is larger than this number of bytes. While file parts
+    can be moved to disk, regular form field data is stored in memory only and
+    could fill up memory. The default is 500kB.
+-   :attr:`~Request.max_form_parts` Stop reading request data if more than this number
+    of parts are sent in multipart form data. This is useful to stop a very large number
+    of very small parts, especially file parts. The default is 1000.
 
-Because certain data can't be moved to the hard disk (regular post data)
-whereas temporary files can, there is a second limit you can set.  The
-:attr:`~Request.max_form_memory_size` limits the size of `POST`
-transmitted form data.  By setting it to ``1024 * 1024 * 2`` you can make
-sure that all in memory-stored fields are not more than 2MB in size.
+Each of these values can be set on the ``Request`` class to affect the default
+for all requests, or on a ``request`` instance to change the behavior for a
+specific request. For example, a small limit can be set by default, and a large
+limit can be set on an endpoint that accepts video uploads. These values should
+be tuned to the specific needs of your application and endpoints.
 
-This however does *not* affect in-memory stored files if the
-`stream_factory` used returns a in-memory file.
+Using Werkzeug to set these limits is only one layer of protection. WSGI servers
+and HTTPS servers should set their own limits on size and timeouts. The operating system
+or container manager should set limits on memory and processing time for server
+processes.
+
+If a 413 Content Too Large error is returned before the entire request is read, clients
+may show a "connection reset" failure instead of the 413 error. This is based on how the
+WSGI/HTTP server and client handle connections, it's not something the WSGI application
+(Werkzeug) has control over.
 
 
 How to extend Parsing?

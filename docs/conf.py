@@ -10,30 +10,37 @@ release, version = get_version("Werkzeug")
 
 # General --------------------------------------------------------------
 
-master_doc = "index"
+default_role = "code"
 extensions = [
     "sphinx.ext.autodoc",
+    "sphinx.ext.extlinks",
     "sphinx.ext.intersphinx",
-    "pallets_sphinx_themes",
-    "sphinx_issues",
     "sphinxcontrib.log_cabinet",
+    "pallets_sphinx_themes",
 ]
 autoclass_content = "both"
+autodoc_member_order = "bysource"
 autodoc_typehints = "description"
-intersphinx_mapping = {"python": ("https://docs.python.org/3/", None)}
-issues_github_path = "pallets/werkzeug"
+autodoc_preserve_defaults = True
+extlinks = {
+    "issue": ("https://github.com/pallets/werkzeug/issues/%s", "#%s"),
+    "pr": ("https://github.com/pallets/werkzeug/pull/%s", "#%s"),
+    "ghsa": ("https://github.com/advisories/GHSA-%s", "GHSA-%s"),
+}
+intersphinx_mapping = {
+    "python": ("https://docs.python.org/3/", None),
+}
 
 # HTML -----------------------------------------------------------------
 
 html_theme = "werkzeug"
+html_theme_options = {"index_sidebar_logo": False}
 html_context = {
     "project_links": [
         ProjectLink("Donate", "https://palletsprojects.com/donate"),
         ProjectLink("PyPI Releases", "https://pypi.org/project/Werkzeug/"),
         ProjectLink("Source Code", "https://github.com/pallets/werkzeug/"),
         ProjectLink("Issue Tracker", "https://github.com/pallets/werkzeug/issues/"),
-        ProjectLink("Website", "https://palletsprojects.com/p/werkzeug/"),
-        ProjectLink("Twitter", "https://twitter.com/PalletsTeam"),
         ProjectLink("Chat", "https://discord.gg/pallets"),
     ]
 }
@@ -43,13 +50,7 @@ html_sidebars = {
 }
 singlehtml_sidebars = {"index": ["project.html", "localtoc.html", "ethicalads.html"]}
 html_static_path = ["_static"]
-html_favicon = "_static/favicon.ico"
-html_logo = "_static/werkzeug.png"
+html_favicon = "_static/shortcut-icon.png"
+html_logo = "_static/werkzeug-vertical.png"
 html_title = f"Werkzeug Documentation ({version})"
 html_show_sourcelink = False
-
-# LaTeX ----------------------------------------------------------------
-
-latex_documents = [
-    (master_doc, f"Werkzeug-{version}.tex", html_title, author, "manual")
-]

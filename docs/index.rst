@@ -1,5 +1,11 @@
+.. rst-class:: hide-header
+
 Werkzeug
 ========
+
+.. image:: _static/werkzeug-horizontal.png
+    :align: center
+    :target: https://werkzeug.palletsprojects.com
 
 *werkzeug* German noun: "tool".
 Etymology: *werk* ("work"), *zeug* ("stuff")
@@ -72,7 +78,6 @@ Additional Information
     :maxdepth: 2
 
     terms
-    unicode
     request_data
     license
     changes

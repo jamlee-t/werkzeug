@@ -1,8 +1,8 @@
 """Does the synchronization. Called by "manage-plnt.py sync"."""
 from datetime import datetime
-from html import escape
 
 import feedparser
+from markupsafe import escape
 
 from .database import Blog
 from .database import Entry
@@ -16,7 +16,7 @@ HTML_MIMETYPES = {"text/html", "application/xhtml+xml"}
 
 def sync():
     """
-    Performs a synchronization. Articles that are already syncronized aren't
+    Performs a synchronization. Articles that are already synchronized aren't
     touched anymore.
     """
     for blog in Blog.query.all():
